@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:17.11-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paper_os
+      POSTGRES_USER: paper_os
+      POSTGRES_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paper_os -d paper_os"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - paper_postgres_data:/var/lib/postgresql/data
+    networks:
+      - paper_internal
+
+  paper-api:
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    image: personal-os-paper-api:0.1.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)
+    networks:
+      - paper_internal
+      - web
+
+volumes:
+  paper_postgres_data:
+
+networks:
+  paper_internal:
+    internal: true
+  web:
+    external: true
