@@ -10,6 +10,11 @@ This directory defines the first private server slice for the paper pipeline:
 The raw paper source of truth remains Google Drive. This stack currently stores
 no papers and contains no Google, DeepSeek, Cloudflare, or database credentials.
 
+`legal-site/` contains the public OAuth application overview, privacy policy,
+and terms. It contains no credentials or private paper data. Serve it from the
+existing Caddy static volume with `Caddyfile.legal.snippet`; unlike the reader,
+these policy pages must remain publicly reachable.
+
 ## Server preparation
 
 From the repository root on the server:

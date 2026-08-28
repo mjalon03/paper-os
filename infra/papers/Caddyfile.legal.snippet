@@ -1,0 +1,7 @@
+legal.minjae-jo.com {
+    tls /certs/origin.crt /certs/origin.key
+
+    root * /srv/legal
+    encode zstd gzip
+    file_server
+}
