@@ -17,16 +17,33 @@ services:
     networks:
       - paper_internal
 
+  paper-data-init:
+    image: alpine:3.24
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - install -d -o 1000 -g 1000 /data/incoming /data/library/raw
+    volumes:
+      - paper_data:/data
+
   paper-api:
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
-    image: personal-os-paper-api:0.1.0
+    image: personal-os-paper-api:0.2.0
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      paper-data-init:
+        condition: service_completed_successfully
     environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
       PAPER_DB_HOST: postgres
       PAPER_DB_PORT: "5432"
     expose:
@@ -43,11 +60,44 @@ services:
       - paper_internal
       - web
 
+  paper-worker:
+    image: personal-os-paper-api:0.2.0
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paper-data-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_DATA_DIR: /data
+      PAPER_DRIVE_INBOX: "paper-drive:Paper Inbox"
+      PAPER_RCLONE_CONFIG: /config/rclone/rclone.conf
+      PAPER_SYNC_TIMES: ${PAPER_SYNC_TIMES:-07:00,19:00}
+      PAPER_TIMEZONE: ${PAPER_TIMEZONE:-Asia/Hong_Kong}
+    volumes:
+      - paper_data:/data
+      - ../../secrets/rclone:/config/rclone
+    networks:
+      - paper_internal
+      - paper_egress
+
 volumes:
   paper_postgres_data:
+  paper_data:
 
 networks:
   paper_internal:
     internal: true
+  paper_egress:
   web:
     external: true
