@@ -1,0 +1,4 @@
+docling==2.71.0
+psycopg[binary]==3.3.4
+pymupdf==1.28.2
+transformers==4.57.6

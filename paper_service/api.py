@@ -2,6 +2,7 @@
 
 import os
 import re
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 
@@ -16,6 +17,7 @@ from .database import (
     queue_sync,
 )
 from .reader import ReaderFailure, read_manifest, render_library, render_reader
+from .reader_v2 import read_article, render_reader_v2, v2_asset_path
 from .status import readiness_status, service_status
 
 
@@ -27,7 +29,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Personal OS Paper API",
-    version="0.4.0",
+    version="0.5.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -92,6 +94,32 @@ def read_paper(paper_id: int) -> HTMLResponse:
     except ReaderFailure:
         raise HTTPException(status_code=503) from None
     return HTMLResponse(render_reader(paper, manifest))
+
+
+@app.get("/read/{paper_id}/v2", response_class=HTMLResponse)
+def read_paper_v2(paper_id: int) -> HTMLResponse:
+    paper = get_reader_paper(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404)
+    try:
+        article = read_article(_data_dir(), paper_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404) from None
+    except (ValueError, ReaderFailure):
+        raise HTTPException(status_code=503) from None
+    return HTMLResponse(render_reader_v2(paper, article))
+
+
+@app.get("/read/{paper_id}/v2/assets/{asset_name}")
+def reader_v2_asset(paper_id: int, asset_name: str) -> FileResponse:
+    if not get_reader_paper(paper_id):
+        raise HTTPException(status_code=404)
+    try:
+        path = v2_asset_path(_data_dir(), paper_id, asset_name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404) from None
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type)
 
 
 @app.get("/read/{paper_id}/assets/{asset_name}")

@@ -10,7 +10,7 @@ class PaperServiceStatusTests(unittest.TestCase):
     def test_service_status_is_stable(self):
         self.assertEqual(
             service_status(),
-            {"service": "paper-api", "status": "ok", "version": "0.4.0"},
+            {"service": "paper-api", "status": "ok", "version": "0.5.0"},
         )
 
     def test_database_target_defaults(self):

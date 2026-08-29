@@ -29,11 +29,23 @@ services:
     volumes:
       - paper_data:/data
 
+  paper-reader-v2-models-init:
+    image: alpine:3.24
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - install -d -o 1000 -g 1000 /models
+    volumes:
+      - paper_reader_v2_models:/models
+
   paper-api:
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
-    image: personal-os-paper-api:0.4.0
+    image: personal-os-paper-api:0.5.0
     restart: unless-stopped
     depends_on:
       postgres:
@@ -65,7 +77,7 @@ services:
       - web
 
   paper-worker:
-    image: personal-os-paper-api:0.4.0
+    image: personal-os-paper-api:0.5.0
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
@@ -100,9 +112,45 @@ services:
       - paper_internal
       - paper_egress
 
+  paper-reader-v2-worker:
+    image: personal-os-paper-reader-v2:0.5.0
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile.reader-v2
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.reader_v2_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paper-data-init:
+        condition: service_completed_successfully
+      paper-reader-v2-models-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_DATA_DIR: /data
+      PAPER_READER_V2_ALLOWED_IDS: ${PAPER_READER_V2_ALLOWED_IDS:-1,15,21}
+      PAPER_READER_V2_POLL_SECONDS: ${PAPER_READER_V2_POLL_SECONDS:-30}
+      HF_HOME: /models
+    mem_limit: 2500m
+    memswap_limit: 3g
+    cpus: 1.0
+    volumes:
+      - paper_data:/data
+      - paper_reader_v2_models:/models
+    networks:
+      - paper_internal
+      - paper_egress
+
 volumes:
   paper_postgres_data:
   paper_data:
+  paper_reader_v2_models:
 
 networks:
   paper_internal:

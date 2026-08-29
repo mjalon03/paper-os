@@ -13,6 +13,9 @@ slice for the paper pipeline:
 - coordinate-aware two-column extraction and a private mobile reader with
   source-page images, a table of contents, typography controls, and local
   reading progress;
+- a staged reader-v2 worker that prefers eligible PMC JATS and individual media,
+  then falls back to resource-bounded Docling extraction and verified figure
+  crops without modifying the v1 output;
 - PostgreSQL with a persistent Docker volume;
 - no host-published application or database ports;
 - attachment to the existing external Docker network named `web`.
@@ -49,6 +52,12 @@ From the repository root on the server:
 5. Confirm that the external Docker network `web` exists.
 6. Validate with `docker compose --env-file infra/papers/.env -f infra/papers/compose.yml config`.
 7. Start with `docker compose --env-file infra/papers/.env -f infra/papers/compose.yml up -d --build`.
+
+Reader v2 initially processes only paper IDs `1,15,21`. Keep
+`PAPER_READER_V2_ALLOWED_IDS` set to that review cohort until all three pass
+manual review. Setting it to `all` enables conversion for the full organized
+library. The v2 worker is limited to one CPU and 2.5 GB RAM and stores downloaded
+Docling models in the `paper_reader_v2_models` volume.
 
 The API is reachable only by containers attached to `web`; it is not published
 on a host port. Add `Caddyfile.snippet` to the existing Caddy configuration only

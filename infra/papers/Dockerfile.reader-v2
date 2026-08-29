@@ -1,0 +1,22 @@
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/models
+
+WORKDIR /app
+
+RUN groupadd --system paper && useradd --system --uid 1000 --gid paper --home-dir /app paper \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libxcb1 libglib2.0-0 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY infra/papers/requirements-reader-v2.txt /app/requirements-reader-v2.txt
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir --requirement /app/requirements-reader-v2.txt
+
+COPY paper_service /app/paper_service
+
+USER paper
+
+CMD ["python", "-m", "paper_service.reader_v2_worker"]

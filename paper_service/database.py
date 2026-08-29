@@ -64,7 +64,14 @@ CREATE TABLE IF NOT EXISTS papers (
     reader_version INTEGER,
     reader_manifest_path TEXT,
     reader_generated_at TIMESTAMPTZ,
-    reader_error TEXT
+    reader_error TEXT,
+    reader_v2_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (reader_v2_status IN ('pending', 'processing', 'ready', 'failed')),
+    reader_v2_attempts INTEGER NOT NULL DEFAULT 0,
+    reader_v2_source TEXT,
+    reader_v2_manifest_path TEXT,
+    reader_v2_generated_at TIMESTAMPTZ,
+    reader_v2_error TEXT
 );
 
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS processing_status TEXT NOT NULL DEFAULT 'pending';
@@ -86,12 +93,21 @@ ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_version INTEGER;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_manifest_path TEXT;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_generated_at TIMESTAMPTZ;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_error TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_v2_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_v2_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_v2_source TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_v2_manifest_path TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_v2_generated_at TIMESTAMPTZ;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_v2_error TEXT;
 
 CREATE INDEX IF NOT EXISTS papers_processing_queue
 ON papers (processing_status, id);
 
 CREATE INDEX IF NOT EXISTS papers_reader_queue
 ON papers (reader_status, id);
+
+CREATE INDEX IF NOT EXISTS papers_reader_v2_queue
+ON papers (reader_v2_status, id);
 """
 
 PUBLIC_JOB_COLUMNS = """
@@ -356,6 +372,70 @@ def fail_reader_paper(paper_id: int, error_code: str) -> None:
     with connection() as database:
         database.execute(
             """UPDATE papers SET reader_status = 'failed', reader_error = %s
+               WHERE id = %s""",
+            (error_code[:80], paper_id),
+        )
+
+
+def recover_reader_v2_papers() -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_v2_status = 'pending',
+               reader_v2_error = 'worker_interrupted'
+               WHERE reader_v2_status = 'processing'"""
+        )
+
+
+def retry_failed_reader_v2_papers(max_attempts: int = 3) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_v2_status = 'pending'
+               WHERE reader_v2_status = 'failed' AND reader_v2_attempts < %s""",
+            (max_attempts,),
+        )
+
+
+def claim_paper_for_reader_v2(allowed_ids: list[int] | None) -> dict[str, Any] | None:
+    with connection() as database:
+        parameters: tuple[Any, ...] = ()
+        allowed = ""
+        if allowed_ids is not None:
+            if not allowed_ids:
+                return None
+            allowed = " AND id = ANY(%s)"
+            parameters = (allowed_ids,)
+        row = database.execute(
+            f"""UPDATE papers SET reader_v2_status = 'processing',
+               reader_v2_attempts = reader_v2_attempts + 1,
+               reader_v2_error = NULL
+               WHERE id = (
+                   SELECT id FROM papers
+                   WHERE processing_status = 'organized'
+                     AND reader_v2_status = 'pending'{allowed}
+                   ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
+               )
+               RETURNING id, sha256, size_bytes, stored_path, title, authors,
+                         publication_year, doi, category, paper_type""",
+            parameters,
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def complete_reader_v2_paper(paper_id: int, manifest_path: str, source: str) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_v2_status = 'ready',
+               reader_v2_source = %s, reader_v2_manifest_path = %s,
+               reader_v2_generated_at = NOW(), reader_v2_error = NULL
+               WHERE id = %s""",
+            (source, manifest_path, paper_id),
+        )
+
+
+def fail_reader_v2_paper(paper_id: int, error_code: str) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_v2_status = 'failed', reader_v2_error = %s
                WHERE id = %s""",
             (error_code[:80], paper_id),
         )
