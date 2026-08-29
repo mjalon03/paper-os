@@ -158,6 +158,7 @@ class ArticleModelTests(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", rendered)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
         self.assertIn('/read/7/v2/assets/fig1.jpg', rendered)
+        self.assertIn('href="/read/7">기존 리더</a>', rendered)
         self.assertNotIn("page-001.jpg", rendered)
         self.assertIn("참고문헌", rendered)
 

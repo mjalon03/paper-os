@@ -151,12 +151,12 @@ library:
 6. Ask for user review of the three benchmark papers.
 7. Convert the remaining library only after that review passes.
 
-## Staged deployment verification
+## Staged deployment and full-library verification
 
 Reader v2 version 0.5.0 was deployed beside v1 on 2026-08-29. The library's
-existing `/read/<id>` links still serve v1; the review cohort is available at
-`/read/<id>/v2`. The dedicated worker is restricted to IDs 1, 15, and 21 until
-manual review passes.
+initial `/read/<id>` links continued to serve v1 while the review cohort was
+available at `/read/<id>/v2`. The dedicated worker was initially restricted to
+IDs 1, 15, and 21.
 
 | ID | Source | Sections | Body paragraphs | Figures | Tables | References |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -169,7 +169,23 @@ registry, every referenced figure asset exists, and no `page-*` image is used
 as an inline v2 figure. The API, v1 worker, v2 worker, and PostgreSQL containers
 remained healthy; the Docling container did not restart or report an OOM.
 
-Full-library conversion remains gated on manual phone review of paragraph and
-caption boundaries, scientific symbol rendering, section navigation, figure
-legibility/zoom, theme and type controls, reading-position restoration, and
-the original-PDF action.
+The user accepted the review cohort on 2026-08-29 and authorized the next
+rollout stage. All 18 organized papers were then converted sequentially on the
+OVH host: 9 used PMC JATS and 9 used Docling PDF. Every paper completed on its
+first attempt, with zero failed jobs, worker restarts, or OOM events. After the
+last conversion, the idle worker returned to approximately 321 MiB.
+
+Full-library verification checked every registry row and artifact. All 18 raw
+PDF SHA-256 values remained unchanged, all Article JSON files passed schema
+validation and contained non-empty section and paragraph content, every
+referenced figure asset existed, and no `page-*` image appeared as an inline
+figure. The verification reported zero integrity issues. Three conservative
+quality warnings remain: one unassociated picture on paper 10 and two on paper
+20. These pictures are omitted rather than exposed as full-page images and are
+review candidates for a later extraction-quality iteration.
+
+The library now links every ready card to `/read/<id>/v2`. The original v1
+reader remains available at `/read/<id>` and is linked from each v2 article
+header. Server-internal live checks confirmed 18 v2 library links, HTTP 200 for
+both reader versions, and a healthy API. The complete automated suite passed
+113 tests before deployment.

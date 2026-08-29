@@ -400,13 +400,19 @@ def render_library(papers: list[dict[str, Any]]) -> str:
             if value
         )
         reader_status = str(paper.get("reader_status") or "pending")
-        if reader_status == "ready":
+        reader_v2_status = str(paper.get("reader_v2_status") or "pending")
+        if reader_v2_status == "ready":
+            cards.append(
+                f'<a class="paper-card" href="/read/{int(paper["id"])}/v2"><span class="status">READER V2</span><h2>{title}</h2><div class="meta">{meta}</div></a>'
+            )
+        elif reader_status == "ready":
             cards.append(
                 f'<a class="paper-card" href="/read/{int(paper["id"])}"><span class="status">READY</span><h2>{title}</h2><div class="meta">{meta}</div></a>'
             )
         else:
+            status = reader_v2_status if reader_v2_status != "pending" else reader_status
             cards.append(
-                f'<div class="paper-card"><span class="status">{html.escape(reader_status.upper())}</span><h2>{title}</h2><div class="meta">{meta}</div></div>'
+                f'<div class="paper-card"><span class="status">{html.escape(status.upper())}</span><h2>{title}</h2><div class="meta">{meta}</div></div>'
             )
     content = "".join(cards) or '<p class="meta">아직 정리된 논문이 없습니다.</p>'
     body = f'<header class="hero"><div class="wrap"><div class="eyebrow">Personal paper library</div><h1>읽을 논문</h1><div class="meta">모바일 읽기용으로 변환된 개인 라이브러리</div></div></header><main class="wrap library">{content}</main>'

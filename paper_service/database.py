@@ -445,7 +445,8 @@ def list_reader_papers() -> list[dict[str, Any]]:
     with connection() as database:
         rows = database.execute(
             """SELECT id, title, authors, publication_year, category, paper_type,
-                      reader_status, reader_generated_at
+                      reader_status, reader_generated_at, reader_v2_status,
+                      reader_v2_generated_at
                FROM papers WHERE processing_status = 'organized'
                ORDER BY imported_at DESC, id DESC"""
         ).fetchall()

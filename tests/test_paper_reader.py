@@ -131,6 +131,11 @@ class PaperReaderTests(unittest.TestCase):
         library = render_library([paper])
         self.assertIn('href="/read/7"', library)
 
+        paper["reader_v2_status"] = "ready"
+        library = render_library([paper])
+        self.assertIn('href="/read/7/v2"', library)
+        self.assertNotIn('href="/read/7"', library)
+
     def test_manifest_path_is_confined_and_schema_checked(self):
         with self.assertRaises(ReaderFailure):
             safe_relative_path("../manifest.json")
