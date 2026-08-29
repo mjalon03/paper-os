@@ -25,7 +25,7 @@ services:
     command:
       - sh
       - -c
-      - install -d -o 1000 -g 1000 /data/incoming /data/library/raw
+      - install -d -o 1000 -g 1000 /data/incoming /data/library/raw /data/library/mobile
     volumes:
       - paper_data:/data
 
@@ -33,7 +33,7 @@ services:
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
-    image: personal-os-paper-api:0.3.0
+    image: personal-os-paper-api:0.4.0
     restart: unless-stopped
     depends_on:
       postgres:
@@ -46,6 +46,10 @@ services:
       PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
       PAPER_DB_HOST: postgres
       PAPER_DB_PORT: "5432"
+      PAPER_DATA_DIR: /data
+    user: "1000:1000"
+    volumes:
+      - paper_data:/data:ro
     expose:
       - "8000"
     healthcheck:
@@ -61,7 +65,7 @@ services:
       - web
 
   paper-worker:
-    image: personal-os-paper-api:0.3.0
+    image: personal-os-paper-api:0.4.0
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile

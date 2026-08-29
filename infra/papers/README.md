@@ -10,6 +10,9 @@ slice for the paper pipeline:
 - SHA-256 duplicate detection and immutable content-addressed raw storage;
 - local PDF text extraction, validated DeepSeek metadata classification, and
   Drive organization under `Original/<category>/`;
+- coordinate-aware two-column extraction and a private mobile reader with
+  source-page images, a table of contents, typography controls, and local
+  reading progress;
 - PostgreSQL with a persistent Docker volume;
 - no host-published application or database ports;
 - attachment to the existing external Docker network named `web`.

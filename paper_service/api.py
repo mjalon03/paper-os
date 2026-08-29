@@ -1,10 +1,21 @@
-"""Private API entrypoint for the paper pipeline."""
+"""Private API and mobile reader entrypoint for the paper pipeline."""
 
+import os
+import re
 from contextlib import asynccontextmanager
+from pathlib import Path, PurePosixPath
 
-from fastapi import FastAPI, Response, status
+from fastapi import FastAPI, HTTPException, Response, status
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from .database import ensure_schema, latest_sync, queue_sync
+from .database import (
+    ensure_schema,
+    get_reader_paper,
+    latest_sync,
+    list_reader_papers,
+    queue_sync,
+)
+from .reader import ReaderFailure, read_manifest, render_library, render_reader
 from .status import readiness_status, service_status
 
 
@@ -16,12 +27,96 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Personal OS Paper API",
-    version="0.3.0",
+    version="0.4.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def private_response_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Cache-Control"] = "private, no-store"
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; "
+            "script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"
+        )
+    return response
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("PAPER_DATA_DIR", "/data"))
+
+
+def _reader_asset(paper_id: int, asset_name: str) -> Path:
+    if not re.fullmatch(r"page-\d{3}\.jpg", asset_name):
+        raise HTTPException(status_code=404)
+    paper = get_reader_paper(paper_id)
+    if not paper or paper.get("reader_status") != "ready":
+        raise HTTPException(status_code=404)
+    manifest_path = PurePosixPath(str(paper["reader_manifest_path"]))
+    root = (_data_dir() / "library" / "mobile").resolve()
+    path = (root / manifest_path.parent / "assets" / asset_name).resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404)
+    return path
+
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse("/library", status_code=307)
+
+
+@app.get("/library", response_class=HTMLResponse)
+def library() -> HTMLResponse:
+    return HTMLResponse(render_library(list_reader_papers()))
+
+
+@app.get("/read/{paper_id}", response_class=HTMLResponse)
+def read_paper(paper_id: int) -> HTMLResponse:
+    paper = get_reader_paper(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404)
+    if paper.get("reader_status") != "ready" or not paper.get(
+        "reader_manifest_path"
+    ):
+        return HTMLResponse(render_library([paper]), status_code=202)
+    try:
+        manifest = read_manifest(_data_dir(), str(paper["reader_manifest_path"]))
+    except ReaderFailure:
+        raise HTTPException(status_code=503) from None
+    return HTMLResponse(render_reader(paper, manifest))
+
+
+@app.get("/read/{paper_id}/assets/{asset_name}")
+def reader_asset(paper_id: int, asset_name: str) -> FileResponse:
+    return FileResponse(_reader_asset(paper_id, asset_name), media_type="image/jpeg")
+
+
+@app.get("/read/{paper_id}/source.pdf")
+def reader_source(paper_id: int) -> FileResponse:
+    paper = get_reader_paper(paper_id)
+    if not paper or paper.get("reader_status") != "ready":
+        raise HTTPException(status_code=404)
+    relative = PurePosixPath(str(paper["stored_path"]))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HTTPException(status_code=404)
+    root = (_data_dir() / "library" / "raw").resolve()
+    path = (root / relative).resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename="paper.pdf",
+        content_disposition_type="inline",
+    )
 
 
 @app.get("/healthz")

@@ -22,11 +22,15 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
     files_invalid INTEGER NOT NULL DEFAULT 0,
     files_organized INTEGER NOT NULL DEFAULT 0,
     files_processing_failed INTEGER NOT NULL DEFAULT 0,
+    files_reader_ready INTEGER NOT NULL DEFAULT 0,
+    files_reader_failed INTEGER NOT NULL DEFAULT 0,
     error_code TEXT
 );
 
 ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS files_organized INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS files_processing_failed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS files_reader_ready INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS files_reader_failed INTEGER NOT NULL DEFAULT 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS sync_jobs_one_active
 ON sync_jobs ((TRUE))
@@ -53,7 +57,14 @@ CREATE TABLE IF NOT EXISTS papers (
     drive_path TEXT,
     metadata_json JSONB,
     processed_at TIMESTAMPTZ,
-    processing_error TEXT
+    processing_error TEXT,
+    reader_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (reader_status IN ('pending', 'processing', 'ready', 'failed')),
+    reader_attempts INTEGER NOT NULL DEFAULT 0,
+    reader_version INTEGER,
+    reader_manifest_path TEXT,
+    reader_generated_at TIMESTAMPTZ,
+    reader_error TEXT
 );
 
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS processing_status TEXT NOT NULL DEFAULT 'pending';
@@ -69,15 +80,25 @@ ALTER TABLE papers ADD COLUMN IF NOT EXISTS drive_path TEXT;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS metadata_json JSONB;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
 ALTER TABLE papers ADD COLUMN IF NOT EXISTS processing_error TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_version INTEGER;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_manifest_path TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_generated_at TIMESTAMPTZ;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS reader_error TEXT;
 
 CREATE INDEX IF NOT EXISTS papers_processing_queue
 ON papers (processing_status, id);
+
+CREATE INDEX IF NOT EXISTS papers_reader_queue
+ON papers (reader_status, id);
 """
 
 PUBLIC_JOB_COLUMNS = """
 id, trigger, status, requested_at, started_at, finished_at,
 files_seen, files_imported, files_duplicate, files_invalid,
-files_organized, files_processing_failed, error_code
+files_organized, files_processing_failed, files_reader_ready,
+files_reader_failed, error_code
 """
 
 
@@ -173,7 +194,8 @@ def finish_sync(job_id: int, stats: Any) -> None:
             """UPDATE sync_jobs SET status = 'succeeded', finished_at = NOW(),
                files_seen = %s, files_imported = %s, files_duplicate = %s,
                files_invalid = %s, files_organized = %s,
-               files_processing_failed = %s, error_code = NULL WHERE id = %s""",
+               files_processing_failed = %s, files_reader_ready = %s,
+               files_reader_failed = %s, error_code = NULL WHERE id = %s""",
             (
                 stats.seen,
                 stats.imported,
@@ -181,6 +203,8 @@ def finish_sync(job_id: int, stats: Any) -> None:
                 stats.invalid,
                 getattr(stats, "organized", 0),
                 getattr(stats, "processing_failed", 0),
+                getattr(stats, "reader_ready", 0),
+                getattr(stats, "reader_failed", 0),
                 job_id,
             ),
         )
@@ -282,3 +306,79 @@ def fail_paper_processing(paper_id: int, error_code: str) -> None:
                processing_error = %s WHERE id = %s""",
             (error_code[:80], paper_id),
         )
+
+
+def recover_reader_papers() -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_status = 'pending',
+               reader_error = 'worker_interrupted'
+               WHERE reader_status = 'processing'"""
+        )
+
+
+def retry_failed_reader_papers(max_attempts: int = 3) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_status = 'pending'
+               WHERE reader_status = 'failed' AND reader_attempts < %s""",
+            (max_attempts,),
+        )
+
+
+def claim_paper_for_reader() -> dict[str, Any] | None:
+    with connection() as database:
+        row = database.execute(
+            """UPDATE papers SET reader_status = 'processing',
+               reader_attempts = reader_attempts + 1, reader_error = NULL
+               WHERE id = (
+                   SELECT id FROM papers
+                   WHERE processing_status = 'organized' AND reader_status = 'pending'
+                   ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
+               )
+               RETURNING id, sha256, size_bytes, stored_path, title, authors,
+                         publication_year, doi, category, paper_type"""
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def complete_reader_paper(paper_id: int, manifest_path: str, version: int) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_status = 'ready', reader_version = %s,
+               reader_manifest_path = %s, reader_generated_at = NOW(),
+               reader_error = NULL WHERE id = %s""",
+            (version, manifest_path, paper_id),
+        )
+
+
+def fail_reader_paper(paper_id: int, error_code: str) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET reader_status = 'failed', reader_error = %s
+               WHERE id = %s""",
+            (error_code[:80], paper_id),
+        )
+
+
+def list_reader_papers() -> list[dict[str, Any]]:
+    with connection() as database:
+        rows = database.execute(
+            """SELECT id, title, authors, publication_year, category, paper_type,
+                      reader_status, reader_generated_at
+               FROM papers WHERE processing_status = 'organized'
+               ORDER BY imported_at DESC, id DESC"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_reader_paper(paper_id: int) -> dict[str, Any] | None:
+    with connection() as database:
+        row = database.execute(
+            """SELECT id, title, authors, publication_year, doi, category,
+                      paper_type, reader_status, reader_manifest_path,
+                      reader_generated_at, stored_path
+               FROM papers WHERE id = %s AND processing_status = 'organized'""",
+            (paper_id,),
+        ).fetchone()
+        return dict(row) if row else None

@@ -10,21 +10,27 @@ from pathlib import Path
 
 from .database import (
     claim_paper_for_processing,
+    claim_paper_for_reader,
     claim_sync,
     complete_paper_processing,
+    complete_reader_paper,
     ensure_schema,
     fail_paper_processing,
+    fail_reader_paper,
     fail_sync,
     finish_sync,
     queue_sync,
     recover_processing_papers,
+    recover_reader_papers,
     recover_interrupted_sync,
     register_paper,
     retry_failed_papers,
+    retry_failed_reader_papers,
 )
 from .ingest import StorageIntegrityError, ingest_pdfs
 from .metadata import MetadataFailure, deepseek_api_key
 from .organize import OrganizationFailure, ProcessingStats, process_paper
+from .reader import READER_VERSION, ReaderFailure, ReaderStats, convert_paper
 from .sync import SyncFailure, copy_drive_inbox, latest_due_slot, parse_sync_times
 
 
@@ -36,6 +42,8 @@ class CombinedStats:
     invalid: int
     organized: int
     processing_failed: int
+    reader_ready: int
+    reader_failed: int
 
 
 def execute_sync(job_id: int) -> None:
@@ -61,6 +69,22 @@ def execute_sync(job_id: int) -> None:
                     fail_paper_processing(int(paper["id"]), "processing_failed")
                     failed += 1
             processing = ProcessingStats(organized, failed)
+        retry_failed_reader_papers()
+        reader_ready = reader_failed = 0
+        while paper := claim_paper_for_reader():
+            try:
+                manifest_path = convert_paper(paper, data_dir)
+                complete_reader_paper(
+                    int(paper["id"]), manifest_path, READER_VERSION
+                )
+                reader_ready += 1
+            except ReaderFailure as exc:
+                fail_reader_paper(int(paper["id"]), exc.code)
+                reader_failed += 1
+            except Exception:
+                fail_reader_paper(int(paper["id"]), "reader_failed")
+                reader_failed += 1
+        reader = ReaderStats(reader_ready, reader_failed)
         combined = CombinedStats(
             stats.seen,
             stats.imported,
@@ -68,6 +92,8 @@ def execute_sync(job_id: int) -> None:
             stats.invalid,
             processing.organized,
             processing.failed,
+            reader.ready,
+            reader.failed,
         )
         finish_sync(job_id, combined)
     except SyncFailure as exc:
@@ -82,6 +108,7 @@ def run_worker() -> None:
     ensure_schema()
     recover_interrupted_sync()
     recover_processing_papers()
+    recover_reader_papers()
     sync_times = parse_sync_times(os.environ.get("PAPER_SYNC_TIMES", "07:00,19:00"))
     timezone_name = os.environ.get("PAPER_TIMEZONE", "Asia/Hong_Kong")
     poll_seconds = max(5, int(os.environ.get("PAPER_WORKER_POLL_SECONDS", "15")))

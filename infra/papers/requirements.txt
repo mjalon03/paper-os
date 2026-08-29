@@ -1,4 +1,5 @@
 fastapi==0.141.1
 psycopg[binary]==3.3.4
+pymupdf==1.28.2
 pypdf==6.16.2
 uvicorn==0.52.4
