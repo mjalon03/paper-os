@@ -20,8 +20,13 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
     files_imported INTEGER NOT NULL DEFAULT 0,
     files_duplicate INTEGER NOT NULL DEFAULT 0,
     files_invalid INTEGER NOT NULL DEFAULT 0,
+    files_organized INTEGER NOT NULL DEFAULT 0,
+    files_processing_failed INTEGER NOT NULL DEFAULT 0,
     error_code TEXT
 );
+
+ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS files_organized INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sync_jobs ADD COLUMN IF NOT EXISTS files_processing_failed INTEGER NOT NULL DEFAULT 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS sync_jobs_one_active
 ON sync_jobs ((TRUE))
@@ -34,13 +39,45 @@ CREATE TABLE IF NOT EXISTS papers (
     source_path TEXT NOT NULL,
     stored_path TEXT NOT NULL,
     first_job_id BIGINT REFERENCES sync_jobs(id),
-    imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processing_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (processing_status IN ('pending', 'processing', 'organized', 'failed')),
+    processing_attempts INTEGER NOT NULL DEFAULT 0,
+    title TEXT,
+    authors JSONB,
+    publication_year INTEGER,
+    doi TEXT,
+    category TEXT,
+    paper_type TEXT,
+    confidence DOUBLE PRECISION,
+    drive_path TEXT,
+    metadata_json JSONB,
+    processed_at TIMESTAMPTZ,
+    processing_error TEXT
 );
+
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS processing_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS processing_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS title TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS authors JSONB;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS publication_year INTEGER;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS doi TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS paper_type TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS drive_path TEXT;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS metadata_json JSONB;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS processing_error TEXT;
+
+CREATE INDEX IF NOT EXISTS papers_processing_queue
+ON papers (processing_status, id);
 """
 
 PUBLIC_JOB_COLUMNS = """
 id, trigger, status, requested_at, started_at, finished_at,
-files_seen, files_imported, files_duplicate, files_invalid, error_code
+files_seen, files_imported, files_duplicate, files_invalid,
+files_organized, files_processing_failed, error_code
 """
 
 
@@ -135,8 +172,17 @@ def finish_sync(job_id: int, stats: Any) -> None:
         database.execute(
             """UPDATE sync_jobs SET status = 'succeeded', finished_at = NOW(),
                files_seen = %s, files_imported = %s, files_duplicate = %s,
-               files_invalid = %s, error_code = NULL WHERE id = %s""",
-            (stats.seen, stats.imported, stats.duplicate, stats.invalid, job_id),
+               files_invalid = %s, files_organized = %s,
+               files_processing_failed = %s, error_code = NULL WHERE id = %s""",
+            (
+                stats.seen,
+                stats.imported,
+                stats.duplicate,
+                stats.invalid,
+                getattr(stats, "organized", 0),
+                getattr(stats, "processing_failed", 0),
+                job_id,
+            ),
         )
 
 
@@ -165,3 +211,74 @@ def register_paper(
             (sha256, size_bytes, source_path, stored_path, job_id),
         ).fetchone()
         return row is not None
+
+
+def recover_processing_papers() -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET processing_status = 'pending',
+               processing_error = 'worker_interrupted'
+               WHERE processing_status = 'processing'"""
+        )
+
+
+def retry_failed_papers(max_attempts: int = 3) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET processing_status = 'pending'
+               WHERE processing_status = 'failed' AND processing_attempts < %s""",
+            (max_attempts,),
+        )
+
+
+def claim_paper_for_processing() -> dict[str, Any] | None:
+    with connection() as database:
+        row = database.execute(
+            """UPDATE papers SET processing_status = 'processing',
+               processing_attempts = processing_attempts + 1,
+               processing_error = NULL
+               WHERE id = (
+                   SELECT id FROM papers WHERE processing_status = 'pending'
+                   ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
+               )
+               RETURNING id, sha256, source_path, stored_path"""
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def complete_paper_processing(
+    paper_id: int,
+    metadata: dict[str, Any],
+    drive_path: str,
+) -> None:
+    import json
+
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET processing_status = 'organized', title = %s,
+               authors = %s::jsonb, publication_year = %s, doi = %s,
+               category = %s, paper_type = %s, confidence = %s,
+               drive_path = %s, metadata_json = %s::jsonb,
+               processed_at = NOW(), processing_error = NULL WHERE id = %s""",
+            (
+                metadata["title"],
+                json.dumps(metadata["authors"], ensure_ascii=False),
+                metadata["year"],
+                metadata["doi"],
+                metadata["category"],
+                metadata["paper_type"],
+                metadata["confidence"],
+                drive_path,
+                json.dumps(metadata, ensure_ascii=False),
+                paper_id,
+            ),
+        )
+
+
+def fail_paper_processing(paper_id: int, error_code: str) -> None:
+    with connection() as database:
+        database.execute(
+            """UPDATE papers SET processing_status = 'failed',
+               processing_error = %s WHERE id = %s""",
+            (error_code[:80], paper_id),
+        )

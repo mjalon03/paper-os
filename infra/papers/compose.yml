@@ -33,7 +33,7 @@ services:
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
-    image: personal-os-paper-api:0.2.0
+    image: personal-os-paper-api:0.3.0
     restart: unless-stopped
     depends_on:
       postgres:
@@ -61,7 +61,7 @@ services:
       - web
 
   paper-worker:
-    image: personal-os-paper-api:0.2.0
+    image: personal-os-paper-api:0.3.0
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
@@ -81,12 +81,16 @@ services:
       PAPER_DB_PORT: "5432"
       PAPER_DATA_DIR: /data
       PAPER_DRIVE_INBOX: "paper-drive:Paper Inbox"
+      PAPER_DRIVE_ORIGINAL: "paper-drive:Original"
       PAPER_RCLONE_CONFIG: /config/rclone/rclone.conf
+      PAPER_DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      PAPER_DEEPSEEK_MODEL: ${PAPER_DEEPSEEK_MODEL:-deepseek-v4-flash}
       PAPER_SYNC_TIMES: ${PAPER_SYNC_TIMES:-07:00,19:00}
       PAPER_TIMEZONE: ${PAPER_TIMEZONE:-Asia/Hong_Kong}
     volumes:
       - paper_data:/data
       - ../../secrets/rclone:/config/rclone
+      - ../../secrets/deepseek/api_key:/run/secrets/deepseek_api_key:ro
     networks:
       - paper_internal
       - paper_egress
