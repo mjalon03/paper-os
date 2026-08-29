@@ -55,7 +55,7 @@ def drive_destination(metadata: PaperMetadata, sha256: str) -> str:
     suffix = f" - {sha256[:8]}.pdf"
     filename = _truncate_utf8(prefix, 220 - len(suffix.encode("utf-8"))) + suffix
     base = os.environ.get("PAPER_DRIVE_ORIGINAL", "paper-drive:Original").rstrip("/")
-    return f"{base}/{metadata.category}/{year}/{filename}"
+    return f"{base}/{metadata.category}/{filename}"
 
 
 def _safe_source_path(relative_source: str) -> str:

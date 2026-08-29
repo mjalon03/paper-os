@@ -85,6 +85,7 @@ services:
       PAPER_RCLONE_CONFIG: /config/rclone/rclone.conf
       PAPER_DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
       PAPER_DEEPSEEK_MODEL: ${PAPER_DEEPSEEK_MODEL:-deepseek-v4-flash}
+      PAPER_TAXONOMY_MODEL: ${PAPER_TAXONOMY_MODEL:-deepseek-v4-pro}
       PAPER_SYNC_TIMES: ${PAPER_SYNC_TIMES:-07:00,19:00}
       PAPER_TIMEZONE: ${PAPER_TIMEZONE:-Asia/Hong_Kong}
     volumes:

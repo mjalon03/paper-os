@@ -9,7 +9,7 @@ slice for the paper pipeline:
   Kong time by default;
 - SHA-256 duplicate detection and immutable content-addressed raw storage;
 - local PDF text extraction, validated DeepSeek metadata classification, and
-  Drive organization under `Original/<category>/<year>/`;
+  Drive organization under `Original/<category>/`;
 - PostgreSQL with a persistent Docker volume;
 - no host-published application or database ports;
 - attachment to the existing external Docker network named `web`.
@@ -20,6 +20,12 @@ Drive files during ingestion. Organization only moves a Drive file after the
 raw server copy and validated metadata are available. The destination filename
 contains a short content hash to prevent unrelated papers with the same title
 from overwriting each other.
+
+Per-paper metadata classification uses `deepseek-v4-flash`. A future taxonomy
+audit that compares many papers and proposes folder splits or merges is reserved
+for `deepseek-v4-pro`; the taxonomy audit itself is not scheduled in this slice.
+Publication year remains in each filename and in PostgreSQL rather than creating
+a year directory.
 
 `legal-site/` contains the public OAuth application overview, privacy policy,
 and terms. It contains no credentials or private paper data. Serve it from the

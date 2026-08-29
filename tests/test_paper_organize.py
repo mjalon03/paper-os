@@ -31,7 +31,8 @@ class PaperOrganizeTests(unittest.TestCase):
     def test_destination_is_collision_resistant_and_drive_safe(self):
         destination = drive_destination(self.metadata, "a" * 64)
         self.assertEqual(first_author_name(self.metadata.authors), "Lovelace")
-        self.assertIn("paper-drive:Original/NeuroAI/2026/", destination)
+        self.assertIn("paper-drive:Original/NeuroAI/", destination)
+        self.assertNotIn("/NeuroAI/2026/", destination)
         self.assertTrue(destination.endswith(" - aaaaaaaa.pdf"))
         self.assertNotIn("?", destination)
         self.assertNotIn(": Study", destination)
