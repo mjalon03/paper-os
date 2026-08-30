@@ -1,0 +1,10 @@
+# Personal OS project metadata. JSON-compatible YAML values are safely escaped.
+schema_version: 2
+project_id: "paper-os"
+name: "Paper OS"
+area: "Research Infrastructure"
+vault_note: "Projects/Paper OS/Paper OS.md"
+status: "active"
+sensitivity: "internal"
+capture_level: "durable"
+deepseek_allowed: true
