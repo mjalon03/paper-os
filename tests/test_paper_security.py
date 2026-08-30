@@ -344,6 +344,20 @@ class ApiSecurityMiddlewareTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 307)
 
+    def test_html_csp_allows_only_self_hosted_controller_scripts(self):
+        with patch("paper_service.api.list_reader_papers", return_value=[]):
+            response = self.request(
+                "GET",
+                "/library",
+                headers={ACCESS_JWT_HEADER: "signed-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        policy = response.headers["content-security-policy"]
+        self.assertIn("script-src 'self' 'unsafe-inline'", policy)
+        self.assertNotIn("http:", policy)
+        self.assertNotIn("https:", policy)
+
     def test_human_identity_cannot_use_machine_outbox_namespace(self):
         response = self.request(
             "GET",

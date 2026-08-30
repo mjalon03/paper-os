@@ -437,7 +437,8 @@ async def private_response_headers(request: Request, call_next):
     if response.headers.get("content-type", "").startswith("text/html"):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; "
-            "script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'"
+            "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+            "frame-ancestors 'none'"
         )
     return response
 
