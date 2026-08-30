@@ -206,32 +206,16 @@ class ArticleModelTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             parse_allowed_ids("1,bad")
 
-    def test_isolated_conversion_uses_spawned_worker(self):
-        submitted = []
-
-        class Result:
-            def result(self):
-                return "7/v2/article.json", "pmc_jats"
-
-        class Executor:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return None
-
-            def submit(self, function, paper, data_dir):
-                submitted.append((function, paper, data_dir, self.kwargs))
-                return Result()
-
-        with patch("paper_service.reader_v2_worker.ProcessPoolExecutor", Executor):
+    def test_isolated_conversion_uses_remote_source_boundaries(self):
+        with patch(
+            "paper_service.reader_v2_worker.convert_paper_v2",
+            return_value=("7/v2/article.json", "docling_pdf"),
+        ) as convert:
             converted = convert_isolated({"id": 7}, Path("/data"))
-        self.assertEqual(converted, ("7/v2/article.json", "pmc_jats"))
-        self.assertEqual(submitted[0][1], {"id": 7})
-        self.assertEqual(submitted[0][2], Path("/data"))
+        self.assertEqual(converted, ("7/v2/article.json", "docling_pdf"))
+        self.assertEqual(convert.call_args.args, ({"id": 7}, Path("/data")))
+        self.assertTrue(callable(convert.call_args.kwargs["pmc_article_builder"]))
+        self.assertTrue(callable(convert.call_args.kwargs["pdf_article_converter"]))
 
 
 class PMCSourceTests(unittest.TestCase):

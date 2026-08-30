@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
+import ipaddress
 import json
 import re
+import socket
+import ssl
 import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable
@@ -19,7 +22,11 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_MEDIA_BYTES = 40 * 1024 * 1024
 PMCID_RE = re.compile(r"PMC[1-9]\d*")
 VERSION_RE = re.compile(r"(PMC[1-9]\d*)\.(\d+)")
+DOI_RE = re.compile(r"10\.\d{4,9}/[!-~]{1,240}", re.IGNORECASE)
 Fetch = Callable[[str, int], bytes]
+_PMC_HTTPS_HOSTS = frozenset(
+    {"www.ncbi.nlm.nih.gov", "pmc.ncbi.nlm.nih.gov", S3_HOST}
+)
 
 
 class PMCFailure(RuntimeError):
@@ -32,33 +39,126 @@ def normalize_doi(value: str) -> str:
     doi = value.strip()
     doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi, flags=re.IGNORECASE)
     doi = re.sub(r"^doi:\s*", "", doi, flags=re.IGNORECASE).strip().casefold()
-    if not doi.startswith("10.") or any(character.isspace() for character in doi):
+    if not DOI_RE.fullmatch(doi) or any(
+        character in doi for character in ('"', "'", "<", ">", "\\")
+    ):
         raise PMCFailure("pmc_doi_invalid")
     return doi
 
 
-def _fetch(url: str, limit: int) -> bytes:
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "PersonalPaperReader/0.5 (private research tool)"},
-    )
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, hostname: str, address: str, *, timeout: float):
+        super().__init__(hostname, 443, timeout=timeout, context=ssl.create_default_context())
+        self._pinned_address = address
+
+    def connect(self) -> None:
+        raw = socket.create_connection(
+            (self._pinned_address, 443),
+            self.timeout,
+        )
+        try:
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        except BaseException:
+            raw.close()
+            raise
+
+
+def _public_addresses(hostname: str) -> tuple[str, ...]:
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            final = urllib.parse.urlsplit(response.geturl())
-            if final.scheme != "https" or final.hostname not in {
-                "www.ncbi.nlm.nih.gov",
-                "pmc.ncbi.nlm.nih.gov",
-                S3_HOST,
-            }:
-                raise PMCFailure("pmc_untrusted_redirect")
-            declared = response.headers.get("Content-Length")
-            if declared and int(declared) > limit:
+        values = {
+            info[4][0]
+            for info in socket.getaddrinfo(
+                hostname,
+                443,
+                type=socket.SOCK_STREAM,
+            )
+        }
+        addresses = tuple(sorted(values))
+        if not addresses or any(
+            not ipaddress.ip_address(address).is_global for address in addresses
+        ):
+            raise PMCFailure("pmc_address_rejected")
+        return addresses
+    except PMCFailure:
+        raise
+    except (OSError, ValueError) as exc:
+        raise PMCFailure("pmc_address_rejected") from exc
+
+
+def _open_pmc_connection(hostname: str, address: str) -> _PinnedHTTPSConnection:
+    return _PinnedHTTPSConnection(hostname, address, timeout=20)
+
+
+def _fetch(url: str, limit: int) -> bytes:
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise PMCFailure("pmc_url_invalid") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _PMC_HTTPS_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or port not in {None, 443}
+        or not parsed.path.startswith("/")
+    ):
+        raise PMCFailure("pmc_url_invalid")
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= MAX_MEDIA_BYTES
+    ):
+        raise PMCFailure("pmc_response_limit_invalid")
+    target = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    addresses = _public_addresses(str(parsed.hostname))
+    connection = None
+    response = None
+    try:
+        last_error: BaseException | None = None
+        for address in addresses:
+            try:
+                connection = _open_pmc_connection(str(parsed.hostname), address)
+                connection.request(
+                    "GET",
+                    target,
+                    headers={
+                        "Accept": "*/*",
+                        "User-Agent": "PersonalPaperReader/0.6 (private research tool)",
+                    },
+                )
+                response = connection.getresponse()
+                break
+            except Exception as exc:
+                last_error = exc
+                if connection is not None:
+                    connection.close()
+                    connection = None
+        if response is None:
+            raise PMCFailure("pmc_request_failed") from last_error
+        if 300 <= response.status <= 399:
+            raise PMCFailure("pmc_redirect_denied")
+        if response.status != 200:
+            raise PMCFailure("pmc_request_failed")
+        declared = response.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                declared_size = int(declared)
+            except ValueError as exc:
+                raise PMCFailure("pmc_response_invalid") from exc
+            if declared_size < 0 or declared_size > limit:
                 raise PMCFailure("pmc_response_too_large")
-            payload = response.read(limit + 1)
+        payload = response.read(limit + 1)
     except PMCFailure:
         raise
     except Exception as exc:
         raise PMCFailure("pmc_request_failed") from exc
+    finally:
+        if response is not None:
+            response.close()
+        if connection is not None:
+            connection.close()
     if len(payload) > limit:
         raise PMCFailure("pmc_response_too_large")
     return payload
@@ -81,6 +181,8 @@ def resolve_pmcid(doi: str, fetch: Fetch = _fetch) -> str | None:
 
 
 def _listing_versions(payload: bytes, pmcid: str) -> list[int]:
+    if re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", payload, re.IGNORECASE):
+        raise PMCFailure("pmc_listing_invalid")
     try:
         root = ET.fromstring(payload)
     except ET.ParseError as exc:

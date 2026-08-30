@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.minjae-jo.paper-vault-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>paper_service.vault_bridge_cli</string>
+    <string>--client-id-file</string>
+    <string>__CLIENT_ID_FILE__</string>
+    <string>--client-secret-file</string>
+    <string>__CLIENT_SECRET_FILE__</string>
+    <string>--consumer-id</string>
+    <string>mac-mini</string>
+    <string>--vault-root</string>
+    <string>__OBSIDIAN_VAULT_ROOT__</string>
+    <string>--ledger</string>
+    <string>__PRIVATE_LEDGER_PATH__</string>
+    <string>sync-once</string>
+    <string>--apply</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPOSITORY_ROOT__</string>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

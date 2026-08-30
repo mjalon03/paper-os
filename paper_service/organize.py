@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from .metadata import MetadataFailure, PaperMetadata, classify_with_deepseek, extract_pdf_context
+from .metadata import MetadataFailure, PaperMetadata, classify_with_deepseek
+from .parser_client import extract_pdf_context
 
 
 class OrganizationFailure(RuntimeError):
@@ -73,6 +74,9 @@ def rclone_moveto(source_path: str, destination: str) -> None:
         "moveto",
         source,
         destination,
+        "--immutable",
+        "--checksum",
+        "--ignore-existing",
         "--config",
         os.environ.get("PAPER_RCLONE_CONFIG", "/config/rclone/rclone.conf"),
         "--contimeout",
@@ -104,7 +108,10 @@ def process_paper(
     raw_path = data_dir / "library" / "raw" / paper["stored_path"]
     if not raw_path.is_file():
         raise OrganizationFailure("raw_paper_missing")
-    context = extract_pdf_context(raw_path)
+    context = extract_pdf_context(
+        str(paper["stored_path"]),
+        str(paper["sha256"]).strip(),
+    )
     metadata = classify(context)
     destination = drive_destination(metadata, paper["sha256"].strip())
     move(paper["source_path"], destination)

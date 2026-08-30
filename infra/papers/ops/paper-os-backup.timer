@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Paper OS local backup schedule (template; not installed)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Hong_Kong
+Persistent=true
+RandomizedDelaySec=15m
+AccuracySec=1m
+Unit=paper-os-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Paper OS verified local database and durable-data backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+UMask=0077
+WorkingDirectory=/home/ubuntu/services/paper-os
+ExecStart=/usr/bin/python3 /home/ubuntu/services/paper-os/infra/papers/ops/paper_backup.py --service-root /home/ubuntu/services/paper-os --compose-file /home/ubuntu/services/paper-os/infra/papers/compose.yml --env-file /home/ubuntu/services/paper-os/infra/papers/.env --backup-root /home/ubuntu/services/paper-os/backups/automated backup --retention-days 14
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/services/paper-os/backups/automated

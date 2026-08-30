@@ -53,6 +53,9 @@ class PaperOrganizeTests(unittest.TestCase):
             rclone_moveto("nested/paper.pdf", "paper-drive:Original/Other/2026/paper.pdf")
         command = run.call_args.args[0]
         self.assertEqual(command[1], "moveto")
+        self.assertIn("--immutable", command)
+        self.assertIn("--checksum", command)
+        self.assertIn("--ignore-existing", command)
         self.assertEqual(command[2], "paper-drive:Paper Inbox/nested/paper.pdf")
         self.assertNotIn("sync", command)
 
@@ -84,6 +87,7 @@ class PaperOrganizeTests(unittest.TestCase):
             )
             self.assertEqual(metadata["category"], "NeuroAI")
             self.assertEqual(moves, [("paper.pdf", destination)])
+            extract.assert_called_once_with("aa/hash.pdf", "a" * 64)
             self.assertFalse(staged.exists())
             self.assertTrue(raw.exists())
 

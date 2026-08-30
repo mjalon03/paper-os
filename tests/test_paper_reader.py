@@ -132,9 +132,20 @@ class PaperReaderTests(unittest.TestCase):
         self.assertIn('href="/read/7"', library)
 
         paper["reader_v2_status"] = "ready"
+        paper["reading_status"] = "reading"
+        paper["reading_progress"] = 0.42
+        paper["favorite"] = True
         library = render_library([paper])
         self.assertIn('href="/read/7/v2"', library)
         self.assertNotIn('href="/read/7"', library)
+        self.assertIn('data-reading-status="reading"', library)
+        self.assertIn('data-favorite="true"', library)
+        self.assertIn("읽는 중", library)
+        self.assertIn('style="width:42.0%"', library)
+        self.assertIn('data-filter="favorite"', library)
+        self.assertIn('id="sync-now"', library)
+        self.assertIn('fetch("/jobs/sync"', library)
+        self.assertIn('"X-Paper-Action":"1"', library)
 
     def test_manifest_path_is_confined_and_schema_checked(self):
         with self.assertRaises(ReaderFailure):

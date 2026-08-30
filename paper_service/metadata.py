@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.error
-import urllib.request
+import stat
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .deepseek_client import (
+    DeepSeekTransportError,
+    complete_deepseek_request,
+)
 
 
 CATEGORIES = (
@@ -108,8 +112,15 @@ def deepseek_api_key() -> str | None:
         return direct
     key_file = Path(os.environ.get("PAPER_DEEPSEEK_API_KEY_FILE", "/run/secrets/deepseek_api_key"))
     try:
+        details = key_file.lstat()
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or stat.S_IMODE(details.st_mode) & 0o077
+            or not 1 <= details.st_size <= 4096
+        ):
+            return None
         return key_file.read_text(encoding="utf-8").strip() or None
-    except OSError:
+    except (OSError, UnicodeError):
         return None
 
 
@@ -146,35 +157,23 @@ def classify_with_deepseek(context: ExtractedContext) -> PaperMetadata:
         "response_format": {"type": "json_object"},
         "temperature": 0,
         "max_tokens": 1200,
+        "stream": False,
     }
     endpoint = os.environ.get("PAPER_DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(
-            request, timeout=int(os.environ.get("PAPER_DEEPSEEK_TIMEOUT_SECONDS", "120"))
-        ) as response:
-            envelope = json.load(response)
-        content = envelope["choices"][0]["message"]["content"]
-        if not content:
-            raise MetadataFailure("deepseek_empty_response")
-        return validate_metadata(json.loads(content), context)
+        completion = complete_deepseek_request(
+            payload,
+            api_key=api_key,
+            endpoint=endpoint,
+            timeout_seconds=int(
+                os.environ.get("PAPER_DEEPSEEK_TIMEOUT_SECONDS", "120")
+            ),
+        )
+        return validate_metadata(json.loads(completion.content), context)
     except MetadataFailure:
         raise
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            code = "deepseek_auth_failed"
-        elif exc.code == 429:
-            code = "deepseek_rate_limited"
-        else:
-            code = f"deepseek_http_{exc.code}"
-        raise MetadataFailure(code) from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise MetadataFailure("deepseek_unavailable") from exc
+    except DeepSeekTransportError as exc:
+        raise MetadataFailure(exc.code) from exc
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise MetadataFailure("deepseek_invalid_response") from exc
 

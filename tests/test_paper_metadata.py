@@ -5,6 +5,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from paper_service.deepseek_client import (
+    DeepSeekCompletion,
+    DeepSeekTokenUsage,
+)
+
 from paper_service.metadata import (
     ExtractedContext,
     MetadataFailure,
@@ -12,20 +17,6 @@ from paper_service.metadata import (
     deepseek_api_key,
     validate_metadata,
 )
-
-
-class FakeResponse:
-    def __init__(self, payload):
-        self.payload = payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return None
-
-    def read(self, *_args):
-        return json.dumps(self.payload).encode()
 
 
 class PaperMetadataTests(unittest.TestCase):
@@ -70,6 +61,7 @@ class PaperMetadataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             key_file = Path(temporary) / "key"
             key_file.write_text("test-key\n")
+            key_file.chmod(0o600)
             with patch.dict(
                 os.environ,
                 {"PAPER_DEEPSEEK_API_KEY_FILE": str(key_file)},
@@ -77,8 +69,33 @@ class PaperMetadataTests(unittest.TestCase):
             ):
                 self.assertEqual(deepseek_api_key(), "test-key")
 
-    @patch("paper_service.metadata.urllib.request.urlopen")
-    def test_deepseek_json_response_is_parsed(self, urlopen):
+    def test_api_key_file_must_be_private_regular_and_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            key_file = root / "key"
+            key_file.write_text("test-key\n")
+            key_file.chmod(0o644)
+            with patch.dict(
+                os.environ,
+                {"PAPER_DEEPSEEK_API_KEY_FILE": str(key_file)},
+                clear=True,
+            ):
+                self.assertIsNone(deepseek_api_key())
+
+            target = root / "target"
+            target.write_text("test-key\n")
+            target.chmod(0o600)
+            key_file.unlink()
+            key_file.symlink_to(target)
+            with patch.dict(
+                os.environ,
+                {"PAPER_DEEPSEEK_API_KEY_FILE": str(key_file)},
+                clear=True,
+            ):
+                self.assertIsNone(deepseek_api_key())
+
+    @patch("paper_service.metadata.complete_deepseek_request")
+    def test_deepseek_json_response_is_parsed(self, complete):
         metadata = {
             "title": "A Brain Paper",
             "authors": ["Ada Lovelace"],
@@ -89,18 +106,22 @@ class PaperMetadataTests(unittest.TestCase):
             "short_title": "A Brain Paper",
             "confidence": 0.8,
         }
-        urlopen.return_value = FakeResponse(
-            {"choices": [{"message": {"content": json.dumps(metadata)}}]}
+        complete.return_value = DeepSeekCompletion(
+            content=json.dumps(metadata),
+            usage=DeepSeekTokenUsage(100, 20, 120),
+            request_sha256="a" * 64,
+            response_sha256="b" * 64,
+            provider_request_id="request-1",
         )
-        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "secret"}, clear=True):
+        api_key = "sk-" + "s" * 64
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": api_key}, clear=True):
             result = classify_with_deepseek(self.context)
         self.assertEqual(result.doi, "10.1000/test")
-        request = urlopen.call_args.args[0]
-        self.assertEqual(request.get_header("Authorization"), "Bearer secret")
-        body = json.loads(request.data)
+        body = complete.call_args.args[0]
         self.assertEqual(body["response_format"], {"type": "json_object"})
         self.assertEqual(body["thinking"], {"type": "disabled"})
-        self.assertNotIn("secret", request.data.decode())
+        self.assertFalse(body["stream"])
+        self.assertEqual(complete.call_args.kwargs["api_key"], api_key)
 
 
 if __name__ == "__main__":

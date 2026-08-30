@@ -208,7 +208,11 @@ def classify_block(block: dict[str, Any], body_size: float) -> str:
 
 
 def extract_document(
-    pdf_path: Path, paper: dict[str, Any], output_dir: Path
+    pdf_path: Path,
+    paper: dict[str, Any],
+    output_dir: Path,
+    *,
+    max_pages: int | None = None,
 ) -> dict[str, Any]:
     try:
         import pymupdf
@@ -224,6 +228,9 @@ def extract_document(
         raise ReaderFailure("reader_pdf_encrypted")
 
     page_count = document.page_count
+    if max_pages is not None and page_count > max_pages:
+        document.close()
+        raise ReaderFailure("reader_page_limit_exceeded")
     assets_dir = output_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     blocks_out: list[dict[str, Any]] = []
@@ -381,7 +388,8 @@ main.reader{{padding:1.8rem 0 20vh;font-size:calc(1.12rem * var(--scale));line-h
 .page-tag{{display:flex;align-items:center;gap:.7rem;margin:2.5rem 0 1.2rem;color:var(--muted);font:600 .75rem/1 ui-sans-serif,system-ui,sans-serif}}.page-tag:before{{content:"";height:1px;background:var(--line);flex:1}}.page-tag a{{text-decoration:none}}
 figure{{margin:1.8rem 0 2.2rem;padding:.7rem;background:var(--card);border:1px solid var(--line);border-radius:1rem}}figure img{{display:block;width:100%;height:auto;border-radius:.55rem}}figcaption{{padding:.8rem .35rem .2rem;color:var(--muted);font:.88rem/1.5 ui-sans-serif,system-ui,sans-serif}}
 details.toc{{margin:1rem 0;border:1px solid var(--line);border-radius:.8rem;background:var(--card);padding:.8rem 1rem;font-family:ui-sans-serif,system-ui,sans-serif}}.toc li{{margin:.55rem 0}}.toc a{{text-decoration:none}}
-.library{{display:grid;gap:1rem;padding:2rem 0}}.paper-card{{display:block;padding:1.2rem;border:1px solid var(--line);border-radius:1rem;background:var(--card);text-decoration:none;color:var(--ink)}}.paper-card:hover{{border-color:var(--accent)}}.paper-card h2{{margin:.35rem 0 .55rem;font-size:1.3rem}}.status{{font:600 .75rem/1 ui-sans-serif,system-ui;color:var(--accent)}}
+.library{{display:grid;gap:1rem;padding:1rem 0 2rem}}.library-filter{{display:flex;gap:.5rem;overflow:auto;padding:1rem 0 0;font:600 .8rem/1 ui-sans-serif,system-ui,sans-serif}}.library-filter button{{white-space:nowrap;border:1px solid var(--line);border-radius:999px;padding:.55rem .75rem;background:var(--card);color:var(--ink)}}.library-filter button.active{{background:var(--accent);color:var(--paper)}}.paper-card{{display:block;padding:1.2rem;border:1px solid var(--line);border-radius:1rem;background:var(--card);text-decoration:none;color:var(--ink)}}.paper-card:hover{{border-color:var(--accent)}}.paper-card h2{{margin:.35rem 0 .55rem;font-size:1.3rem}}.status{{font:600 .75rem/1 ui-sans-serif,system-ui;color:var(--accent)}}.card-top{{display:flex;justify-content:space-between;gap:.5rem}}.reading-progress{{height:3px;margin-top:.9rem;border-radius:99px;background:var(--line);overflow:hidden}}.reading-progress span{{display:block;height:100%;background:var(--accent)}}
+.library-actions{{display:flex;align-items:center;flex-wrap:wrap;gap:.65rem;margin-top:1.15rem;font:600 .85rem/1.4 ui-sans-serif,system-ui,sans-serif}}.library-actions button{{border:0;border-radius:999px;padding:.7rem 1rem;background:var(--accent);color:var(--paper);font:inherit;cursor:pointer}}.library-actions button:disabled{{opacity:.6;cursor:wait}}#sync-message{{color:var(--muted)}}
 body.force-dark{{--paper:#161817;--ink:#ece9df;--muted:#a8aaa4;--accent:#74c9bd;--line:#343936;--card:#202320}}@media(min-width:48rem){{.wrap{{width:min(100% - 4rem,var(--measure))}}}}
 </style></head><body>{body}<script>{script}</script></body></html>"""
 
@@ -401,22 +409,54 @@ def render_library(papers: list[dict[str, Any]]) -> str:
         )
         reader_status = str(paper.get("reader_status") or "pending")
         reader_v2_status = str(paper.get("reader_v2_status") or "pending")
+        reading_status = str(paper.get("reading_status") or "unread")
+        progress = paper.get("reading_progress", 0)
+        progress_value = (
+            float(progress)
+            if isinstance(progress, (int, float)) and not isinstance(progress, bool)
+            else 0.0
+        )
+        progress_value = min(1.0, max(0.0, progress_value))
+        favorite = bool(paper.get("favorite"))
+        marker = "★" if favorite else ""
+        state_label = {
+            "unread": "안 읽음",
+            "reading": "읽는 중",
+            "completed": "완료",
+            "on_hold": "보류",
+            "rereading": "다시 읽기",
+        }.get(reading_status, "안 읽음")
+        card_inner = (
+            f'<div class="card-top"><span class="status">{state_label}</span>'
+            f'<span aria-label="즐겨찾기">{marker}</span></div><h2>{title}</h2>'
+            f'<div class="meta">{meta}</div><div class="reading-progress" '
+            f'aria-label="읽기 진행률 {round(progress_value * 100)}%"><span '
+            f'style="width:{progress_value * 100:.1f}%"></span></div>'
+        )
+        attributes = (
+            f'data-reading-status="{html.escape(reading_status)}" '
+            f'data-favorite="{str(favorite).lower()}"'
+        )
         if reader_v2_status == "ready":
             cards.append(
-                f'<a class="paper-card" href="/read/{int(paper["id"])}/v2"><span class="status">READER V2</span><h2>{title}</h2><div class="meta">{meta}</div></a>'
+                f'<a class="paper-card" {attributes} href="/read/{int(paper["id"])}/v2">{card_inner}</a>'
             )
         elif reader_status == "ready":
             cards.append(
-                f'<a class="paper-card" href="/read/{int(paper["id"])}"><span class="status">READY</span><h2>{title}</h2><div class="meta">{meta}</div></a>'
+                f'<a class="paper-card" {attributes} href="/read/{int(paper["id"])}">{card_inner}</a>'
             )
         else:
             status = reader_v2_status if reader_v2_status != "pending" else reader_status
             cards.append(
-                f'<div class="paper-card"><span class="status">{html.escape(status.upper())}</span><h2>{title}</h2><div class="meta">{meta}</div></div>'
+                f'<div class="paper-card" {attributes}><span class="status">'
+                f'{html.escape(status.upper())}</span><h2>{title}</h2>'
+                f'<div class="meta">{meta}</div></div>'
             )
     content = "".join(cards) or '<p class="meta">아직 정리된 논문이 없습니다.</p>'
-    body = f'<header class="hero"><div class="wrap"><div class="eyebrow">Personal paper library</div><h1>읽을 논문</h1><div class="meta">모바일 읽기용으로 변환된 개인 라이브러리</div></div></header><main class="wrap library">{content}</main>'
-    return _shell("Paper Library", body)
+    filters = '<nav class="library-filter wrap" aria-label="논문 필터"><button class="active" data-filter="all">전체</button><button data-filter="unread">안 읽음</button><button data-filter="reading">읽는 중</button><button data-filter="completed">완료</button><button data-filter="on_hold">보류</button><button data-filter="favorite">즐겨찾기</button></nav>'
+    body = f'<header class="hero"><div class="wrap"><div class="eyebrow">Personal paper library</div><h1>읽을 논문</h1><div class="meta">모바일 읽기용으로 변환된 개인 라이브러리 · <a href="/search">내 논문 검색</a> · <a href="/admin">논문 운영</a></div><div class="library-actions"><button id="sync-now" type="button">Google Drive 지금 확인</button><span id="sync-message" role="status" aria-live="polite">새 논문은 매일 두 번 자동 확인합니다.</span></div></div></header>{filters}<main class="wrap library">{content}</main>'
+    script = '''const cards=[...document.querySelectorAll(".paper-card")],buttons=[...document.querySelectorAll("[data-filter]")];buttons.forEach(button=>button.onclick=()=>{buttons.forEach(item=>item.classList.toggle("active",item===button));const filter=button.dataset.filter;cards.forEach(card=>{card.hidden=!(filter==="all"||card.dataset.readingStatus===filter||(filter==="favorite"&&card.dataset.favorite==="true"))})});const syncButton=document.querySelector("#sync-now"),syncMessage=document.querySelector("#sync-message");syncButton.onclick=async()=>{syncButton.disabled=true;syncMessage.textContent="확인 요청 중…";try{const response=await fetch("/jobs/sync",{method:"POST",headers:{"X-Paper-Action":"1"}});if(!response.ok)throw new Error("sync_request_failed");const payload=await response.json();const state=payload&&payload.job&&payload.job.status;syncMessage.textContent=state==="running"?"이미 확인 중입니다.":"확인 작업을 요청했습니다."}catch(_error){syncMessage.textContent="요청하지 못했습니다. 잠시 후 다시 시도해 주세요."}finally{syncButton.disabled=false}};'''
+    return _shell("Paper Library", body, script)
 
 
 def render_reader(paper: dict[str, Any], manifest: dict[str, Any]) -> str:

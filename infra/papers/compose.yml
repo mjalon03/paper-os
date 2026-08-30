@@ -1,3 +1,20 @@
+x-paper-logging: &paper-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-paper-container-security: &paper-container-security
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=128m
+  logging: *paper-logging
+
 services:
   postgres:
     image: postgres:17.11-alpine3.24
@@ -14,6 +31,9 @@ services:
       start_period: 10s
     volumes:
       - paper_postgres_data:/var/lib/postgresql/data
+    mem_limit: 512m
+    cpus: 1.0
+    logging: *paper-logging
     networks:
       - paper_internal
 
@@ -41,11 +61,72 @@ services:
     volumes:
       - paper_reader_v2_models:/models
 
+  paper-reader-v2-scratch-init:
+    image: alpine:3.24
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - install -d -m 0700 -o 1000 -g 1000 /scratch
+    volumes:
+      - paper_reader_v2_scratch:/scratch
+
+  paper-reader-v2-jobs-init:
+    image: alpine:3.24
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - install -d -m 0700 -o 1000 -g 1000 /jobs
+    volumes:
+      - paper_reader_v2_jobs:/jobs
+
+  paper-pmc-scratch-init:
+    image: alpine:3.24
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - install -d -m 0700 -o 1000 -g 1000 /work/pmc
+    volumes:
+      - paper_pmc_scratch:/work/pmc
+
+  paper-taxonomy-tmp-init:
+    image: alpine:3.24
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - install -d -m 0700 -o 1000 -g 1000 /work/taxonomy
+    volumes:
+      - paper_taxonomy_tmp:/work/taxonomy
+
+  paper-conversion-lock-init:
+    image: alpine:3.24
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    command:
+      - sh
+      - -c
+      - install -d -m 0700 -o 1000 -g 1000 /locks
+    volumes:
+      - paper_conversion_lock:/locks
+
   paper-api:
+    <<: *paper-container-security
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
-    image: personal-os-paper-api:0.5.0
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -59,7 +140,18 @@ services:
       PAPER_DB_HOST: postgres
       PAPER_DB_PORT: "5432"
       PAPER_DATA_DIR: /data
+      PAPER_ACCESS_ENFORCE: ${PAPER_ACCESS_ENFORCE:-true}
+      PAPER_BROWSER_MUTATION_PROTECTION: ${PAPER_BROWSER_MUTATION_PROTECTION:-true}
+      PAPER_ACCESS_TEAM_DOMAIN: ${PAPER_ACCESS_TEAM_DOMAIN:-https://rapid-king-ed86.cloudflareaccess.com}
+      PAPER_ACCESS_AUDIENCE: ${PAPER_ACCESS_AUDIENCE:-666a2a49a6e448cf80a9041826b83c7dead160141e24ee8c3f00db30f2f3ef92}
+      PAPER_PUBLIC_ORIGIN: ${PAPER_PUBLIC_ORIGIN:-https://papers.minjae-jo.com}
+      PAPER_WRITES_ENABLED: ${PAPER_WRITES_ENABLED:-true}
+      PAPER_VAULT_SYNC_SERVICE_ID: ${PAPER_VAULT_SYNC_SERVICE_ID:-}
+      PAPER_KNOWLEDGE_MODEL: ${PAPER_KNOWLEDGE_MODEL:-deepseek-v4-pro}
+      PAPER_QA_MODEL: ${PAPER_QA_MODEL:-deepseek-v4-flash}
     user: "1000:1000"
+    mem_limit: 384m
+    cpus: 0.5
     volumes:
       - paper_data:/data:ro
     expose:
@@ -74,21 +166,74 @@ services:
           urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)
     networks:
       - paper_internal
+      - paper_egress
       - web
 
-  paper-worker:
-    image: personal-os-paper-api:0.5.0
+  paper-parser:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile
     restart: unless-stopped
     user: "1000:1000"
+    command: ["python", "-m", "paper_service.parser_service"]
+    depends_on:
+      paper-data-init:
+        condition: service_completed_successfully
+      paper-conversion-lock-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DATA_DIR: /data
+      PAPER_PARSER_PORT: "8090"
+      PAPER_PARSER_METADATA_TIMEOUT_SECONDS: ${PAPER_PARSER_METADATA_TIMEOUT_SECONDS:-90}
+      PAPER_PARSER_READER_TIMEOUT_SECONDS: ${PAPER_PARSER_READER_TIMEOUT_SECONDS:-600}
+      PAPER_CONVERSION_LOCK_FILE: /locks/heavy-conversion.lock
+      PAPER_CONVERSION_LOCK_TIMEOUT_SECONDS: ${PAPER_CONVERSION_LOCK_TIMEOUT_SECONDS:-1900}
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 0.75
+    pids_limit: 64
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=384m
+    volumes:
+      - paper_data:/data:ro
+      - paper_conversion_lock:/locks
+    expose:
+      - "8090"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - paper_parser_internal
+
+  paper-worker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    mem_limit: 768m
+    cpus: 0.75
     command: ["python", "-m", "paper_service.worker"]
     depends_on:
       postgres:
         condition: service_healthy
       paper-data-init:
         condition: service_completed_successfully
+      paper-parser:
+        condition: service_healthy
     environment:
       PAPER_DB_NAME: paper_os
       PAPER_DB_USER: paper_os
@@ -100,10 +245,17 @@ services:
       PAPER_DRIVE_ORIGINAL: "paper-drive:Original"
       PAPER_RCLONE_CONFIG: /config/rclone/rclone.conf
       PAPER_DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      PAPER_PARSER_URL: http://paper-parser:8090
+      PAPER_PARSER_ALLOWED_HOSTS: paper-parser
+      PAPER_PARSER_METADATA_TIMEOUT_SECONDS: ${PAPER_PARSER_METADATA_CLIENT_TIMEOUT_SECONDS:-2000}
       PAPER_DEEPSEEK_MODEL: ${PAPER_DEEPSEEK_MODEL:-deepseek-v4-flash}
       PAPER_TAXONOMY_MODEL: ${PAPER_TAXONOMY_MODEL:-deepseek-v4-pro}
       PAPER_SYNC_TIMES: ${PAPER_SYNC_TIMES:-07:00,19:00}
       PAPER_TIMEZONE: ${PAPER_TIMEZONE:-Asia/Hong_Kong}
+      PAPER_OPS_HEARTBEAT_ENABLED: ${PAPER_OPS_HEARTBEAT_ENABLED:-true}
+      PAPER_OPS_HEARTBEAT_SERVICE_ID: paper-pipeline
+      PAPER_OPS_HEARTBEAT_WORKER_ID: paper-worker-1
+      PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS: ${PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS:-30}
     volumes:
       - paper_data:/data
       - ../../secrets/rclone:/config/rclone
@@ -111,12 +263,143 @@ services:
     networks:
       - paper_internal
       - paper_egress
+      - paper_parser_internal
 
-  paper-reader-v2-worker:
-    image: personal-os-paper-reader-v2:0.5.0
+  paper-reader-v1-worker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.reader_v1_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paper-data-init:
+        condition: service_completed_successfully
+      paper-parser:
+        condition: service_healthy
+      paper-conversion-lock-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_DATA_DIR: /data
+      PAPER_PARSER_URL: http://paper-parser:8090
+      PAPER_PARSER_ALLOWED_HOSTS: paper-parser
+      PAPER_PARSER_READER_TIMEOUT_SECONDS: ${PAPER_PARSER_READER_CLIENT_TIMEOUT_SECONDS:-2520}
+      PAPER_READER_V1_POLL_SECONDS: ${PAPER_READER_V1_POLL_SECONDS:-15}
+      PAPER_OPS_HEARTBEAT_ENABLED: ${PAPER_OPS_HEARTBEAT_ENABLED:-true}
+      PAPER_OPS_HEARTBEAT_SERVICE_ID: paper-pipeline
+      PAPER_OPS_HEARTBEAT_WORKER_ID: reader-v1-worker-1
+      PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS: ${PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS:-30}
+    mem_limit: 384m
+    cpus: 0.35
+    volumes:
+      - paper_data:/data
+    networks:
+      - paper_internal
+      - paper_parser_internal
+
+  paper-reader-v2-converter:
+    <<: *paper-container-security
+    image: personal-os-paper-reader-v2:${PAPER_IMAGE_TAG:-0.6.0}
     build:
       context: ../..
       dockerfile: infra/papers/Dockerfile.reader-v2
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.reader_v2_converter_service"]
+    depends_on:
+      paper-reader-v2-models-init:
+        condition: service_completed_successfully
+      paper-reader-v2-jobs-init:
+        condition: service_completed_successfully
+      paper-conversion-lock-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_READER_V2_JOBS_DIR: /jobs
+      PAPER_READER_V2_CONVERTER_PORT: "8091"
+      PAPER_READER_V2_CONVERTER_TIMEOUT_SECONDS: ${PAPER_READER_V2_CONVERTER_TIMEOUT_SECONDS:-1200}
+      PAPER_CONVERSION_LOCK_FILE: /locks/heavy-conversion.lock
+      PAPER_CONVERSION_LOCK_TIMEOUT_SECONDS: ${PAPER_CONVERSION_LOCK_TIMEOUT_SECONDS:-1900}
+      HF_HOME: /models
+      DOCLING_ARTIFACTS_PATH: /models/docling
+    mem_limit: 2500m
+    memswap_limit: 2500m
+    cpus: 1.0
+    pids_limit: 128
+    volumes:
+      - paper_reader_v2_jobs:/jobs
+      - paper_reader_v2_models:/models:ro
+      - paper_conversion_lock:/locks
+    expose:
+      - "8091"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8091/healthz', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - paper_reader_v2_internal
+
+  paper-pmc-broker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.pmc_broker_service"]
+    depends_on:
+      paper-pmc-scratch-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_PMC_BROKER_PORT: "8092"
+      PAPER_PMC_BROKER_SCRATCH_DIR: /work/pmc
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 0.5
+    pids_limit: 64
+    volumes:
+      - paper_pmc_scratch:/work/pmc
+    expose:
+      - "8092"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8092/healthz', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - paper_pmc_internal
+      - paper_egress
+
+  paper-reader-v2-worker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
     restart: unless-stopped
     user: "1000:1000"
     command: ["python", "-m", "paper_service.reader_v2_worker"]
@@ -125,8 +408,14 @@ services:
         condition: service_healthy
       paper-data-init:
         condition: service_completed_successfully
-      paper-reader-v2-models-init:
+      paper-reader-v2-scratch-init:
         condition: service_completed_successfully
+      paper-reader-v2-jobs-init:
+        condition: service_completed_successfully
+      paper-reader-v2-converter:
+        condition: service_healthy
+      paper-pmc-broker:
+        condition: service_healthy
     environment:
       PAPER_DB_NAME: paper_os
       PAPER_DB_USER: paper_os
@@ -136,25 +425,247 @@ services:
       PAPER_DATA_DIR: /data
       PAPER_READER_V2_ALLOWED_IDS: ${PAPER_READER_V2_ALLOWED_IDS:-1,15,21}
       PAPER_READER_V2_POLL_SECONDS: ${PAPER_READER_V2_POLL_SECONDS:-30}
-      HF_HOME: /models
-    mem_limit: 2500m
-    memswap_limit: 3g
-    cpus: 1.0
+      PAPER_READER_V2_SCRATCH_DIR: /scratch
+      PAPER_READER_V2_SCRATCH_MAX_BYTES: ${PAPER_READER_V2_SCRATCH_MAX_BYTES:-1073741824}
+      PAPER_READER_V2_SCRATCH_MIN_FREE_BYTES: ${PAPER_READER_V2_SCRATCH_MIN_FREE_BYTES:-536870912}
+      PAPER_READER_V2_SCRATCH_STALE_SECONDS: ${PAPER_READER_V2_SCRATCH_STALE_SECONDS:-3600}
+      PAPER_READER_V2_JOBS_DIR: /jobs
+      PAPER_READER_V2_CONVERTER_URL: http://paper-reader-v2-converter:8091
+      PAPER_READER_V2_CONVERTER_ALLOWED_HOSTS: paper-reader-v2-converter
+      PAPER_READER_V2_CONVERTER_CLIENT_TIMEOUT_SECONDS: ${PAPER_READER_V2_CONVERTER_CLIENT_TIMEOUT_SECONDS:-1260}
+      PAPER_PMC_BROKER_URL: http://paper-pmc-broker:8092
+      PAPER_PMC_BROKER_ALLOWED_HOSTS: paper-pmc-broker
+      PAPER_PMC_BROKER_TIMEOUT_SECONDS: ${PAPER_PMC_BROKER_TIMEOUT_SECONDS:-180}
+      PAPER_OPS_EXECUTION_ENABLED: ${PAPER_OPS_EXECUTION_ENABLED:-true}
+      PAPER_OPS_WORKER_ID: reader-v2-ops-worker-1
+      PAPER_OPS_LEASE_SECONDS: ${PAPER_OPS_LEASE_SECONDS:-1800}
+      PAPER_OPS_RETRY_DELAY_SECONDS: ${PAPER_OPS_RETRY_DELAY_SECONDS:-60}
+      PAPER_OPS_HEARTBEAT_ENABLED: ${PAPER_OPS_HEARTBEAT_ENABLED:-true}
+      PAPER_OPS_HEARTBEAT_SERVICE_ID: paper-pipeline
+      PAPER_OPS_HEARTBEAT_WORKER_ID: reader-v2-worker-1
+      PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS: ${PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS:-30}
+      TMPDIR: /scratch
+      TMP: /scratch
+      TEMP: /scratch
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 0.5
+    pids_limit: 64
     volumes:
       - paper_data:/data
-      - paper_reader_v2_models:/models
+      - paper_reader_v2_scratch:/scratch
+      - paper_reader_v2_jobs:/jobs
+    networks:
+      - paper_internal
+      - paper_reader_v2_internal
+      - paper_pmc_internal
+
+  paper-knowledge-worker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.knowledge_runner"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paper-data-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_DATA_DIR: /data
+      PAPER_DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      PAPER_KNOWLEDGE_MODEL: ${PAPER_KNOWLEDGE_MODEL:-deepseek-v4-pro}
+      PAPER_KNOWLEDGE_POLL_SECONDS: ${PAPER_KNOWLEDGE_POLL_SECONDS:-15}
+      PAPER_KNOWLEDGE_LEASE_SECONDS: ${PAPER_KNOWLEDGE_LEASE_SECONDS:-300}
+      PAPER_DEEPSEEK_TIMEOUT_SECONDS: ${PAPER_DEEPSEEK_TIMEOUT_SECONDS:-120}
+      PAPER_OPS_HEARTBEAT_ENABLED: ${PAPER_OPS_HEARTBEAT_ENABLED:-true}
+      PAPER_OPS_HEARTBEAT_SERVICE_ID: paper-pipeline
+      PAPER_OPS_HEARTBEAT_WORKER_ID: knowledge-worker-1
+      PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS: ${PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS:-30}
+    mem_limit: 384m
+    cpus: 0.5
+    volumes:
+      - paper_data:/data:ro
+      - ../../secrets/deepseek/api_key:/run/secrets/deepseek_api_key:ro
     networks:
       - paper_internal
       - paper_egress
+
+  paper-qa-worker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.qa_runner"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paper-data-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_DATA_DIR: /data
+      PAPER_DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      PAPER_QA_WORKER_ID: qa-worker-1
+      PAPER_QA_POLL_SECONDS: ${PAPER_QA_POLL_SECONDS:-15}
+      PAPER_QA_LEASE_SECONDS: ${PAPER_QA_LEASE_SECONDS:-300}
+      PAPER_QA_RETRY_DELAY_SECONDS: ${PAPER_QA_RETRY_DELAY_SECONDS:-60}
+      PAPER_QA_MAX_OUTPUT_TOKENS: ${PAPER_QA_MAX_OUTPUT_TOKENS:-4096}
+      PAPER_DEEPSEEK_TIMEOUT_SECONDS: ${PAPER_DEEPSEEK_TIMEOUT_SECONDS:-120}
+      PAPER_OPS_HEARTBEAT_ENABLED: ${PAPER_OPS_HEARTBEAT_ENABLED:-true}
+      PAPER_OPS_HEARTBEAT_SERVICE_ID: paper-pipeline
+      PAPER_OPS_HEARTBEAT_WORKER_ID: qa-worker-1
+      PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS: ${PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS:-30}
+    mem_limit: 384m
+    cpus: 0.5
+    volumes:
+      - paper_data:/data:ro
+      - ../../secrets/deepseek/api_key:/run/secrets/deepseek_api_key:ro
+    networks:
+      - paper_internal
+      - paper_egress
+
+  paper-search-index-worker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.search_index_runner"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paper-data-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_DATA_DIR: /data
+      PAPER_SEARCH_INDEX_POLL_SECONDS: ${PAPER_SEARCH_INDEX_POLL_SECONDS:-300}
+      PAPER_OPS_HEARTBEAT_ENABLED: ${PAPER_OPS_HEARTBEAT_ENABLED:-true}
+      PAPER_OPS_HEARTBEAT_SERVICE_ID: paper-pipeline
+      PAPER_OPS_HEARTBEAT_WORKER_ID: search-index-worker-1
+      PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS: ${PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS:-30}
+    mem_limit: 256m
+    cpus: 0.35
+    volumes:
+      - paper_data:/data:ro
+    networks:
+      - paper_internal
+
+  paper-taxonomy-worker:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.taxonomy_runner"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paper-taxonomy-tmp-init:
+        condition: service_completed_successfully
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_DRIVE_ORIGINAL: "paper-drive:Original"
+      PAPER_RCLONE_BIN: /usr/local/bin/rclone
+      PAPER_RCLONE_CONFIG: /config/rclone/rclone.conf
+      PAPER_TAXONOMY_TMP_DIR: /work/taxonomy
+      PAPER_DEEPSEEK_API_KEY_FILE: /run/secrets/deepseek_api_key
+      PAPER_TAXONOMY_WORKER_ID: taxonomy-worker-1
+      PAPER_TAXONOMY_POLL_SECONDS: ${PAPER_TAXONOMY_POLL_SECONDS:-15}
+      PAPER_TAXONOMY_AUDIT_INTERVAL_SECONDS: ${PAPER_TAXONOMY_AUDIT_INTERVAL_SECONDS:-43200}
+      PAPER_TAXONOMY_GENERATION_LEASE_SECONDS: ${PAPER_TAXONOMY_GENERATION_LEASE_SECONDS:-300}
+      PAPER_DEEPSEEK_TIMEOUT_SECONDS: ${PAPER_DEEPSEEK_TIMEOUT_SECONDS:-120}
+      PAPER_TAXONOMY_RCLONE_TIMEOUT_SECONDS: ${PAPER_TAXONOMY_RCLONE_TIMEOUT_SECONDS:-900}
+      PAPER_TAXONOMY_MOVE_LEASE_SECONDS: ${PAPER_TAXONOMY_MOVE_LEASE_SECONDS:-1800}
+      PAPER_OPS_HEARTBEAT_ENABLED: ${PAPER_OPS_HEARTBEAT_ENABLED:-true}
+      PAPER_OPS_HEARTBEAT_SERVICE_ID: paper-pipeline
+      PAPER_OPS_HEARTBEAT_WORKER_ID: taxonomy-worker-1
+      PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS: ${PAPER_OPS_HEARTBEAT_INTERVAL_SECONDS:-30}
+    mem_limit: 384m
+    cpus: 0.5
+    volumes:
+      - paper_taxonomy_tmp:/work/taxonomy
+      # rclone must persist refreshed Google OAuth tokens in this private volume.
+      - ../../secrets/rclone:/config/rclone
+      - ../../secrets/deepseek/api_key:/run/secrets/deepseek_api_key:ro
+    networks:
+      - paper_internal
+      - paper_egress
+
+  paper-ops-monitor:
+    <<: *paper-container-security
+    image: personal-os-paper-api:${PAPER_IMAGE_TAG:-0.6.0}
+    build:
+      context: ../..
+      dockerfile: infra/papers/Dockerfile
+    restart: unless-stopped
+    user: "1000:1000"
+    command: ["python", "-m", "paper_service.ops_runtime"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PAPER_DB_NAME: paper_os
+      PAPER_DB_USER: paper_os
+      PAPER_DB_PASSWORD: ${PAPER_DB_PASSWORD:?PAPER_DB_PASSWORD must be set}
+      PAPER_DB_HOST: postgres
+      PAPER_DB_PORT: "5432"
+      PAPER_OPS_RUNTIME_SERVICES_JSON: '{"paper-pipeline":["knowledge-worker-1","paper-worker-1","qa-worker-1","reader-v1-worker-1","reader-v2-worker-1","search-index-worker-1","taxonomy-worker-1"]}'
+      PAPER_OPS_RUNTIME_MONITOR_INTERVAL_SECONDS: ${PAPER_OPS_RUNTIME_MONITOR_INTERVAL_SECONDS:-30}
+      PAPER_OPS_RUNTIME_STALE_AFTER_SECONDS: ${PAPER_OPS_RUNTIME_STALE_AFTER_SECONDS:-120}
+      PAPER_OPS_RUNTIME_STARTUP_GRACE_SECONDS: ${PAPER_OPS_RUNTIME_STARTUP_GRACE_SECONDS:-90}
+    mem_limit: 256m
+    cpus: 0.25
+    networks:
+      - paper_internal
 
 volumes:
   paper_postgres_data:
   paper_data:
   paper_reader_v2_models:
+  paper_reader_v2_scratch:
+  paper_reader_v2_jobs:
+  paper_pmc_scratch:
+  paper_conversion_lock:
+  paper_taxonomy_tmp:
 
 networks:
   paper_internal:
     internal: true
   paper_egress:
+  paper_parser_internal:
+    internal: true
+  paper_reader_v2_internal:
+    internal: true
+  paper_pmc_internal:
+    internal: true
   web:
     external: true
